@@ -179,6 +179,31 @@ function nextAllowedHeartbeatAt(
   return candidate;
 }
 
+/**
+ * Detect heartbeat responses that mean "nothing to report" — whether Claude
+ * used the exact HEARTBEAT_OK token or got creative with a conversational
+ * equivalent. Short responses (<80 chars) matching common "all clear" phrases
+ * are treated as no-ops and suppressed.
+ */
+const HEARTBEAT_NOOP_PATTERNS = [
+  /^heartbeat_ok$/i,
+  /^nothing.{0,10}(to report|new|going on|happened|notable)/i,
+  /^no (changes|updates|news|action|tasks|reminders|items)/i,
+  /^all (quiet|clear|good|calm)/i,
+  /^everything.{0,10}(good|fine|quiet|clear|normal)/i,
+  /^(still )?no.{0,10}(pending|outstanding)/i,
+  /^(things are |it'?s )?(quiet|calm|still)/i,
+  /^nothing (needs|requires|demands) (attention|action)/i,
+];
+
+function isHeartbeatNoOp(stdout: string): boolean {
+  const text = stdout.replace(/[*~`#>]/g, "").trim();
+  if (text.startsWith("HEARTBEAT_OK")) return true;
+  // Only match short responses — long ones likely have real content
+  if (text.length > 80) return false;
+  return HEARTBEAT_NOOP_PATTERNS.some((p) => p.test(text));
+}
+
 async function setupStatusline() {
   await mkdir(CLAUDE_DIR, { recursive: true });
   await writeFile(STATUSLINE_FILE, STATUSLINE_SCRIPT);
@@ -376,6 +401,28 @@ export async function start(args: string[] = []) {
   let nextHeartbeatAt = 0;
   let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   const daemonStartedAt = Date.now();
+
+  // Rate-limit backoff for autonomous runs (heartbeats, cron jobs).
+  // Skips firing run() while limited; exponential backoff 30m → 60m → 120m, cap 4h.
+  const RATE_LIMIT_INITIAL_BACKOFF_MS = 30 * 60_000;
+  const RATE_LIMIT_MAX_BACKOFF_MS = 4 * 60 * 60_000;
+  let rateLimitedUntil = 0;
+  let rateLimitBackoffMs = RATE_LIMIT_INITIAL_BACKOFF_MS;
+
+  function noteRateLimited() {
+    rateLimitedUntil = Date.now() + rateLimitBackoffMs;
+    console.log(
+      `[${ts()}] Rate limit hit — pausing autonomous runs for ${Math.round(rateLimitBackoffMs / 60_000)}m`
+    );
+    rateLimitBackoffMs = Math.min(rateLimitBackoffMs * 2, RATE_LIMIT_MAX_BACKOFF_MS);
+  }
+  function clearRateLimit() {
+    rateLimitedUntil = 0;
+    rateLimitBackoffMs = RATE_LIMIT_INITIAL_BACKOFF_MS;
+  }
+  function isRateLimitGated(): boolean {
+    return Date.now() < rateLimitedUntil;
+  }
 
   // --- Telegram ---
   let telegramSend: ((chatId: number, text: string) => Promise<void>) | null = null;
@@ -642,9 +689,8 @@ export async function start(args: string[] = []) {
         })
         .then((r) => {
           if (!r) return;
-          const normalized = r.stdout.trim();
-          const shouldSuppress = normalized.startsWith("HEARTBEAT_OK") || normalized.endsWith("HEARTBEAT_OK");
-          const shouldForward = currentSettings.heartbeat.forwardToTelegram || !shouldSuppress;
+          const isNoOp = isHeartbeatNoOp(r.stdout.trim());
+          const shouldForward = currentSettings.heartbeat.forwardToTelegram || !isNoOp;
           if (shouldForward) {
             forwardToTelegram("", r);
             forwardToDiscord("", r);

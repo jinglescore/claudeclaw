@@ -37,7 +37,7 @@ export async function send(args: string[]) {
 
     const text = result.exitCode === 0
       ? result.stdout || "(empty)"
-      : `error (exit ${result.exitCode}): ${result.stderr || "Unknown"}`;
+      : `error (exit ${result.exitCode}): ${result.stderr || result.stdout || "Unknown"}`;
 
     for (const userId of userIds) {
       const res = await fetch(
@@ -67,7 +67,7 @@ export async function send(args: string[]) {
 
     const dText = result.exitCode === 0
       ? result.stdout || "(empty)"
-      : `error (exit ${result.exitCode}): ${result.stderr || "Unknown"}`;
+      : `error (exit ${result.exitCode}): ${result.stderr || result.stdout || "Unknown"}`;
 
     for (const userId of dUserIds) {
       // Create DM channel

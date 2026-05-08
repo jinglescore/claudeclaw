@@ -152,6 +152,7 @@ export interface RunResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  rateLimited: boolean;
 }
 
 export interface AgentStreamEvent {
@@ -868,8 +869,8 @@ export function setPermissionMode(mode: PermissionMode): void {
 function buildSecurityArgs(security: SecurityConfig): string[] {
   const permissionMode = getPermissionMode();
   const args: string[] = permissionMode === "bypassPermissions"
-    ? ["--dangerously-skip-permissions"]
-    : ["--permission-mode", permissionMode];
+    ? ["--dangerously-skip-permissions", "--add-dir", "/"]
+    : ["--permission-mode", permissionMode, "--add-dir", "/"];
 
   switch (security.level) {
     case "locked":
@@ -1317,6 +1318,7 @@ async function execClaude(
     stdout,
     stderr,
     exitCode,
+    rateLimited: Boolean(rateLimitMessage),
   };
 
   // Plugins: agent_end — fire-and-forget, does not block response
@@ -1387,6 +1389,7 @@ async function execClaude(
         stdout: retryExec.rawStdout,
         stderr: retryExec.stderr,
         exitCode: retryExec.exitCode,
+        rateLimited: Boolean(extractRateLimitMessage(retryExec.rawStdout, retryExec.stderr)),
       };
       emitCompactEvent({
         type: "auto-compact-retry",
