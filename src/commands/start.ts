@@ -194,10 +194,12 @@ const HEARTBEAT_NOOP_PATTERNS = [
   /^(still )?no.{0,10}(pending|outstanding)/i,
   /^(things are |it'?s )?(quiet|calm|still)/i,
   /^nothing (needs|requires|demands) (attention|action)/i,
+  /^no response (requested|needed|required)/i,
 ];
 
 function isHeartbeatNoOp(stdout: string): boolean {
   const text = stdout.replace(/[*~`#>]/g, "").trim();
+  if (!text) return true;
   if (text.startsWith("HEARTBEAT_OK")) return true;
   // Only match short responses — long ones likely have real content
   if (text.length > 80) return false;
@@ -608,6 +610,31 @@ export async function start(args: string[] = []) {
     }
   }
 
+  function formatResetLocal(resetAt: Date): string {
+    const tz = currentSettings.timezone || "UTC";
+    try {
+      return new Intl.DateTimeFormat("en-US", {
+        timeZone: tz,
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+        timeZoneName: "short",
+      }).format(resetAt);
+    } catch {
+      return resetAt.toUTCString();
+    }
+  }
+
+  function notifyRateLimitOnce(resetAt: Date) {
+    if (wasRateLimitNotified()) return;
+    markRateLimitNotified();
+    const msg = `Usage limit hit. Pausing until ${formatResetLocal(resetAt)}. Heartbeats and jobs suspended.`;
+    forwardToTelegram("", { exitCode: 1, stdout: msg, stderr: "" });
+    forwardToDiscord("", { exitCode: 1, stdout: msg, stderr: "" });
+  }
+
   function forwardToTelegram(label: string, result: { exitCode: number; stdout: string; stderr: string }) {
     if (!telegramSend || currentSettings.telegram.allowedUserIds.length === 0) return;
     const text = result.exitCode === 0
@@ -654,12 +681,7 @@ export async function start(args: string[] = []) {
       if (isRateLimited()) {
         const resetAt = new Date(getRateLimitResetAt());
         console.log(`[${ts()}] Heartbeat skipped (rate limited until ${resetAt.toISOString()})`);
-        if (!wasRateLimitNotified()) {
-          markRateLimitNotified();
-          const msg = `Usage limit hit. Pausing until ${resetAt.toUTCString()}. Heartbeats and jobs suspended.`;
-          forwardToTelegram("", { exitCode: 1, stdout: msg, stderr: "" });
-          forwardToDiscord("", { exitCode: 1, stdout: msg, stderr: "" });
-        }
+        notifyRateLimitOnce(resetAt);
         return;
       }
       if (isHeartbeatExcludedNow(currentSettings.heartbeat, currentSettings.timezoneOffsetMinutes)) {
@@ -689,6 +711,10 @@ export async function start(args: string[] = []) {
         })
         .then((r) => {
           if (!r) return;
+          if (r.rateLimited) {
+            notifyRateLimitOnce(new Date(getRateLimitResetAt()));
+            return;
+          }
           const isNoOp = isHeartbeatNoOp(r.stdout.trim());
           const shouldForward = currentSettings.heartbeat.forwardToTelegram || !isNoOp;
           if (shouldForward) {
@@ -717,8 +743,12 @@ export async function start(args: string[] = []) {
     const triggerPrompt = hasPromptFlag ? payload : "Wake up, my friend!";
     const triggerResult = await run("trigger", triggerPrompt);
     console.log(triggerResult.stdout);
-    if (telegramFlag) forwardToTelegram("", triggerResult);
-    if (discordFlag) forwardToDiscord("", triggerResult);
+    if (triggerResult.rateLimited) {
+      notifyRateLimitOnce(new Date(getRateLimitResetAt()));
+    } else {
+      if (telegramFlag) forwardToTelegram("", triggerResult);
+      if (discordFlag) forwardToDiscord("", triggerResult);
+    }
     if (triggerResult.exitCode !== 0) {
       console.error(`[${ts()}] Startup trigger failed (exit ${triggerResult.exitCode}). Daemon will continue running.`);
     }
@@ -867,6 +897,12 @@ export async function start(args: string[] = []) {
                 jobRetryState.delete(job.name);
                 console.log(`[${ts()}] Job ${job.name} exhausted ${job.retry} retries`);
               }
+            }
+            if (r.rateLimited) {
+              // Don't forward raw "You've hit your limit" — emit one curated
+              // "Pausing until..." instead, deduplicated across the rate-limit window.
+              notifyRateLimitOnce(new Date(getRateLimitResetAt()));
+              return;
             }
             if (job.notify === false) return;
             if (job.notify === "error" && r.exitCode === 0) return;
