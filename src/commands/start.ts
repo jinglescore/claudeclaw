@@ -635,8 +635,9 @@ export async function start(args: string[] = []) {
     forwardToDiscord("", { exitCode: 1, stdout: msg, stderr: "" });
   }
 
-  function forwardToTelegram(label: string, result: { exitCode: number; stdout: string; stderr: string }) {
+  function forwardToTelegram(label: string, result: { exitCode: number; stdout: string; stderr: string }, allowNoop = false) {
     if (!telegramSend || currentSettings.telegram.allowedUserIds.length === 0) return;
+    if (!allowNoop && result.exitCode === 0 && isHeartbeatNoOp(result.stdout.trim())) return;
     const text = result.exitCode === 0
       ? `${label ? `[${label}]\n` : ""}${result.stdout || "(empty)"}`
       : `${label ? `[${label}] ` : ""}error (exit ${result.exitCode}): ${extractErrorDetail(result) || "Unknown"}`;
@@ -647,8 +648,9 @@ export async function start(args: string[] = []) {
     }
   }
 
-  function forwardToDiscord(label: string, result: { exitCode: number; stdout: string; stderr: string }) {
+  function forwardToDiscord(label: string, result: { exitCode: number; stdout: string; stderr: string }, allowNoop = false) {
     if (!discordSendToUser || currentSettings.discord.allowedUserIds.length === 0) return;
+    if (!allowNoop && result.exitCode === 0 && isHeartbeatNoOp(result.stdout.trim())) return;
     const text = result.exitCode === 0
       ? `${label ? `[${label}]\n` : ""}${result.stdout || "(empty)"}`
       : `${label ? `[${label}] ` : ""}error (exit ${result.exitCode}): ${extractErrorDetail(result) || "Unknown"}`;
@@ -715,12 +717,9 @@ export async function start(args: string[] = []) {
             notifyRateLimitOnce(new Date(getRateLimitResetAt()));
             return;
           }
-          const isNoOp = isHeartbeatNoOp(r.stdout.trim());
-          const shouldForward = currentSettings.heartbeat.forwardToTelegram || !isNoOp;
-          if (shouldForward) {
-            forwardToTelegram("", r);
-            forwardToDiscord("", r);
-          }
+          const allowNoop = Boolean(currentSettings.heartbeat.forwardToTelegram);
+          forwardToTelegram("", r, allowNoop);
+          forwardToDiscord("", r, allowNoop);
         });
       nextHeartbeatAt = nextAllowedHeartbeatAt(
         currentSettings.heartbeat,
